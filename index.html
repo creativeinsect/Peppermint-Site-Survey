@@ -146,6 +146,8 @@ td{min-height:34px;height:36px;text-align:center;vertical-align:top}
     <svg viewBox="0 0 24 24"><path d="M15 14l5-5-5-5"/><path d="M20 9H10a6 6 0 000 12h3"/></svg>Redo</button>
   <span class="sp"></span>
   <span class="hint" id="hint">Header and footer are locked. Everything else is editable.</span>
+  <button class="tb" id="xls" title="Download the filled form as an Excel workbook">
+    <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M3 15h18M9 4v16"/></svg>Download Excel</button>
   <button class="tb primary" id="pdf">
     <svg viewBox="0 0 24 24"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Download PDF</button>
 </div>
@@ -387,6 +389,7 @@ Headcount</th><th class="ed">Machinery</th>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
 <script>
 (() => {
   const doc = document.getElementById('doc');
@@ -545,6 +548,171 @@ Headcount</th><th class="ed">Machinery</th>
     } finally {
       doc.classList.remove('exporting');
       doc.style.transform = keep.t; doc.style.marginLeft = keep.l; doc.style.marginBottom = keep.b; fit();
+      btn.disabled = false; btn.innerHTML = label;
+    }
+  };
+
+  /* ---------------- Excel export ---------------- */
+  const T = el => el ? el.textContent.replace(/\u00a0/g, ' ').trim() : '';
+  const num = v => { const s = String(v).replace(/,/g, '').trim(); return /^-?\d+(\.\d+)?$/.test(s) ? Number(s) : v; };
+  const picked = scope => [...scope.querySelectorAll('.cb.on')].map(c => T(c.closest('.opt').querySelector('.ed'))).join(', ');
+
+  /* Reads the live form into an ordered list of section banners, item headings and answer rows.
+     Row values: [No., Field, Response, Unit, Limit, Status, Remarks] */
+  function collectRows() {
+    const out = [];
+    const sec  = s => out.push({ k: 'sec', s });
+    const head = (no, field) => out.push({ k: 'head', v: [no, field, '', '', '', '', ''] });
+    const row  = (no, field, resp = '', unit = '', limit = '', status = '', remarks = '', sub = false) =>
+      out.push({ k: 'row', sub, v: [no, field, resp, unit, limit, status, remarks] });
+
+    sec('Site details');
+    bodies()[0].querySelectorAll('.top-grid > div, .top-grid3 > div').forEach(d =>
+      row('', T(d.querySelector('.lbl')), T(d.querySelector('.line'))));
+
+    bodies().forEach(body => [...body.children].forEach(el => {
+      if (el.classList.contains('sec')) { sec(T(el)); return; }
+
+      if (el.classList.contains('sign')) {
+        sec('Sign-off');
+        [...el.children].forEach(col => {
+          head('', T(col.querySelector('.h')));
+          col.querySelectorAll('.inl').forEach(i => row('', T(i.querySelector('.t')), T(i.querySelector('.line')), '', '', '', '', true));
+        });
+        return;
+      }
+      if (!el.classList.contains('it')) return;
+
+      if (el.classList.contains('two')) {            // items 05 + 06 share one row
+        [0, 2].forEach(i => {
+          const c = el.children[i + 1];
+          row(T(el.children[i]), T(c.querySelector('.tt')), T(c.querySelector('.line')));
+        });
+        return;
+      }
+      const no = T(el.children[0]), c = el.children[1];
+      const title = T(c.querySelector('.tt'));
+      const lines = [...c.querySelectorAll('.line')].map(T);
+      const ts = [...c.querySelectorAll('.inl > .t')].map(T);
+
+      switch (no) {
+        case '01': row(no, title, "See sheet 'Current Cleaning Method'"); break;
+        case '02': {
+          const l = [...c.querySelectorAll('.lbl')].map(T);
+          head(no, title);
+          row('', l[0], lines[0], '', '', '', '', true);
+          row('', l[1], lines[1], '', '', '', '', true);
+          break;
+        }
+        case '03': case '04': row(no, title, picked(c), '', '', '', lines[0]); break;
+        case '08': row(no, title, num(lines[0]), ts[0]); break;
+        case '09': case '10':
+          row(no, title, num(lines[0]), ts[1], T(c.querySelector('.pill')).replace(/^Limit:\s*/i, ''), picked(c), lines[1]);
+          break;
+        case '11':
+          head(no, title);
+          row('', ts[0], num(lines[0]), ts[1], '', '', '', true);
+          row('', ts[2], num(lines[1]), ts[3], '', '', '', true);
+          break;
+        case '12': row(no, title, picked(c), '', '', '', lines[0]); break;
+        default:   row(no, title, lines[0] || '');
+      }
+    }));
+    return out;
+  }
+
+  const BORDER = { style: 'thin', color: { argb: 'FFC9D6DE' } };
+  const BOX = { top: BORDER, left: BORDER, bottom: BORDER, right: BORDER };
+  function styleHeader(row) {
+    row.height = 30;
+    row.eachCell(c => {
+      c.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
+      c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0FBBD8' } };
+      c.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+      c.border = BOX;
+    });
+  }
+
+  $('xls').onclick = async () => {
+    if (!window.ExcelJS) { alert('The Excel library could not be loaded. Check your internet connection and try again.'); return; }
+    flush();
+    const btn = $('xls'), label = btn.innerHTML;
+    btn.disabled = true; btn.textContent = 'Preparing Excel…';
+    try {
+      const wb = new ExcelJS.Workbook();
+      wb.creator = 'Peppermint Robotics'; wb.created = new Date();
+
+      /* Sheet 1 – the survey answers (each section appears once as a banner, items sit beneath it) */
+      const ws = wb.addWorksheet('Site Survey', {
+        views: [{ state: 'frozen', ySplit: 4 }],
+        pageSetup: { paperSize: 9, orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0 }
+      });
+      ws.columns = [{ width: 7 }, { width: 48 }, { width: 34 }, { width: 9 }, { width: 16 }, { width: 16 }, { width: 42 }];
+      ws.mergeCells('A1:G1');
+      ws.getCell('A1').value = 'Site Survey Form';
+      ws.getCell('A1').font = { bold: true, size: 18, color: { argb: 'FF1B2A35' } };
+      ws.getRow(1).height = 28;
+      ws.mergeCells('A2:G2');
+      ws.getCell('A2').value = 'Peppermint Robotics · Pre-deployment';
+      ws.getCell('A2').font = { size: 11, color: { argb: 'FF0F7C8F' } };
+      ws.addRow([]);
+      ws.getRow(4).values = ['No.', 'Field', 'Response', 'Unit', 'Limit', 'Status', 'Remarks'];
+      styleHeader(ws.getRow(4));
+
+      collectRows().forEach(r => {
+        if (r.k === 'sec') {                                   // section banner, shown once
+          const row = ws.addRow([r.s]);
+          ws.mergeCells('A' + row.number + ':G' + row.number);
+          row.height = 24;
+          const c = row.getCell(1);
+          c.font = { bold: true, size: 12, color: { argb: 'FF0F7C8F' } };
+          c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFDFF3F8' } };
+          c.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
+          c.border = BOX;
+          return;
+        }
+        const row = ws.addRow(r.v.map(v => v === '' ? null : v));
+        row.eachCell({ includeEmpty: true }, (c, col) => {
+          c.border = BOX;
+          c.alignment = { vertical: 'top', wrapText: true, horizontal: col === 1 || col === 4 ? 'center' : 'left' };
+          if (r.k === 'head') {                                // item heading with sub-fields beneath
+            c.font = { bold: true };
+            c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF1F6FA' } };
+          }
+        });
+        if (r.sub) row.getCell(2).alignment = { vertical: 'top', wrapText: true, horizontal: 'left', indent: 2 };
+        const resp = row.getCell(3);
+        if (typeof resp.value === 'string' && /^https?:\/\//i.test(resp.value))
+          resp.value = { text: resp.value, hyperlink: resp.value };
+      });
+
+      /* Sheet 2 – current cleaning method table */
+      const tbl = $('overview');
+      const ws2 = wb.addWorksheet('Current Cleaning Method', {
+        views: [{ state: 'frozen', ySplit: 1 }],
+        pageSetup: { paperSize: 9, orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0 }
+      });
+      ws2.columns = [{ width: 24 }, { width: 22 }, { width: 24 }, { width: 20 }, { width: 16 }, { width: 18 }, { width: 28 }];
+      ws2.addRow([...tbl.tHead.rows[0].cells].map(th => T(th).replace(/\s*\n\s*/g, ' ')));
+      styleHeader(ws2.getRow(1));
+      [...tbl.tBodies[0].rows].forEach(tr => {
+        const row = ws2.addRow([...tr.cells].map((td, i) => T(td) === '' ? null : (i >= 3 && i <= 5 ? num(T(td)) : T(td))));
+        row.eachCell({ includeEmpty: true }, c => { c.border = BOX; c.alignment = { vertical: 'top', wrapText: true, horizontal: 'left' }; });
+      });
+      ws2.autoFilter = { from: 'A1', to: 'G1' };
+
+      const buf = await wb.xlsx.writeBuffer();
+      const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      const client = T($('clientName')).replace(/[^\w\- ]+/g, '').replace(/\s+/g, '_').slice(0, 40);
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'Site_Survey' + (client ? '_' + client : '') + '.xlsx';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+    } catch (err) {
+      console.error(err);
+      alert('Sorry, the Excel file could not be created. Please try again.');
+    } finally {
       btn.disabled = false; btn.innerHTML = label;
     }
   };
